@@ -42,6 +42,7 @@ export default function GPSSpeedometer() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
+  const animationFrameRef = useRef<number | null>(null)
 
   const calculateSpeed = (pos1: Position, pos2: Position): number => {
     const R = 6371e3 // Earth's radius in meters
@@ -96,6 +97,9 @@ export default function GPSSpeedometer() {
       streamRef.current = stream
       if (videoRef.current) {
         videoRef.current.srcObject = stream
+        videoRef.current.onloadedmetadata = () => {
+          startCanvasAnimation()
+        }
       }
       setIsCameraActive(true)
     } catch (err) {
@@ -105,6 +109,7 @@ export default function GPSSpeedometer() {
   }
 
   const stopCamera = () => {
+    stopCanvasAnimation()
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop())
       streamRef.current = null
@@ -173,7 +178,7 @@ export default function GPSSpeedometer() {
     const ctx = canvas.getContext("2d")
     const video = videoRef.current
 
-    if (!ctx) return
+    if (!ctx || video.readyState < 2) return
 
     // Set canvas size to match video
     canvas.width = video.videoWidth || 1920
@@ -204,51 +209,45 @@ export default function GPSSpeedometer() {
     ctx.stroke()
 
     // Speed arc
-    const displaySpeed = unit === "mph" ? speed : speed * 1.609344
-    const speedPercentage = Math.min((displaySpeed / 200) * 100, 100)
-    const arcAngle = (speedPercentage / 100) * 2 * Math.PI
+    const speedPercentage = Math.min(speed / 200, 1)
+    const startAngle = -Math.PI / 2
+    const endAngle = startAngle + speedPercentage * 2 * Math.PI
 
-    ctx.strokeStyle = "#ec4899"
-    ctx.lineWidth = 6
+    ctx.strokeStyle = speed > 80 ? "#ef4444" : speed > 60 ? "#f59e0b" : "#10b981"
+    ctx.lineWidth = 8
     ctx.beginPath()
-    ctx.arc(centerX, centerY, radius - 10, -Math.PI / 2, -Math.PI / 2 + arcAngle)
+    ctx.arc(centerX, centerY, radius - 10, startAngle, endAngle)
     ctx.stroke()
 
     // Speed text
     ctx.fillStyle = "white"
-    ctx.font = `bold ${overlaySize * 0.15}px monospace`
+    ctx.font = `bold ${overlaySize * 0.15}px Arial`
     ctx.textAlign = "center"
-    ctx.fillText(displaySpeed.toFixed(1), centerX, centerY - 10)
+    ctx.fillText(speed.toFixed(1), centerX, centerY - 10)
 
-    ctx.font = `${overlaySize * 0.08}px sans-serif`
-    ctx.fillText(unit.toUpperCase(), centerX, centerY + 20)
+    ctx.font = `${overlaySize * 0.08}px Arial`
+    ctx.fillText(unit, centerX, centerY + 20)
 
     // GPS status
-    ctx.font = `${overlaySize * 0.06}px sans-serif`
+    ctx.font = `${overlaySize * 0.06}px Arial`
     ctx.fillStyle = isConnected ? "#10b981" : "#ef4444"
     ctx.fillText(isConnected ? "GPS Connected" : "GPS Disconnected", centerX, centerY + 40)
   }
 
-  useEffect(() => {
-    let animationId: number
-
+  const startCanvasAnimation = () => {
     const animate = () => {
-      if (isCameraActive) {
-        drawSpeedometerOverlay()
-      }
-      animationId = requestAnimationFrame(animate)
+      drawSpeedometerOverlay()
+      animationFrameRef.current = requestAnimationFrame(animate)
     }
+    animate()
+  }
 
-    if (isCameraActive) {
-      animate()
+  const stopCanvasAnimation = () => {
+    if (animationFrameRef.current) {
+      cancelAnimationFrame(animationFrameRef.current)
+      animationFrameRef.current = null
     }
-
-    return () => {
-      if (animationId) {
-        cancelAnimationFrame(animationId)
-      }
-    }
-  }, [isCameraActive, speed, unit, isConnected])
+  }
 
   const startTracking = () => {
     if (!navigator.geolocation) {
@@ -346,20 +345,15 @@ export default function GPSSpeedometer() {
 
   useEffect(() => {
     return () => {
-      if (watchIdRef.current !== null) {
-        navigator.geolocation.clearWatch(watchIdRef.current)
-      }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop())
-      }
+      stopCanvasAnimation()
     }
   }, [])
 
   if (isCameraActive) {
     return (
       <div className="fixed inset-0 bg-black">
-        <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
-        <canvas ref={canvasRef} className="hidden" />
+        <video ref={videoRef} autoPlay playsInline muted className="hidden" />
+        <canvas ref={canvasRef} className="w-full h-full object-cover" />
 
         {/* Recording Controls Overlay */}
         <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 flex gap-4">
