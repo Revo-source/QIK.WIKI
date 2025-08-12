@@ -4,7 +4,7 @@ import { useState, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Navigation, AlertTriangle, Wifi, WifiOff } from "lucide-react"
+import { Navigation, AlertTriangle, Wifi, WifiOff, Video, VideoOff, Download, Camera } from "lucide-react"
 
 interface SpeedData {
   speed: number
@@ -29,9 +29,19 @@ export default function GPSSpeedometer() {
   const [unit, setUnit] = useState<"mph" | "kmh">("mph")
   const [isConnected, setIsConnected] = useState(false)
 
+  const [isRecording, setIsRecording] = useState(false)
+  const [isCameraActive, setIsCameraActive] = useState(false)
+  const [recordedChunks, setRecordedChunks] = useState<Blob[]>([])
+  const [cameraError, setCameraError] = useState<string | null>(null)
+
   const watchIdRef = useRef<number | null>(null)
   const lastPositionRef = useRef<Position | null>(null)
   const speedHistoryRef = useRef<number[]>([])
+
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
 
   const calculateSpeed = (pos1: Position, pos2: Position): number => {
     const R = 6371e3 // Earth's radius in meters
@@ -70,6 +80,175 @@ export default function GPSSpeedometer() {
 
     return weightedSum / totalWeight
   }
+
+  const startCamera = async () => {
+    try {
+      setCameraError(null)
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "environment", // Use back camera
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: true,
+      })
+
+      streamRef.current = stream
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream
+      }
+      setIsCameraActive(true)
+    } catch (err) {
+      setCameraError("Camera access denied or not available")
+      console.error("Camera error:", err)
+    }
+  }
+
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
+    }
+    setIsCameraActive(false)
+    if (isRecording) {
+      stopRecording()
+    }
+  }
+
+  const startRecording = () => {
+    if (!streamRef.current || !canvasRef.current) return
+
+    const canvas = canvasRef.current
+    const canvasStream = canvas.captureStream(30) // 30 FPS
+
+    // Combine video and canvas streams
+    const combinedStream = new MediaStream([...canvasStream.getVideoTracks(), ...streamRef.current.getAudioTracks()])
+
+    const mediaRecorder = new MediaRecorder(combinedStream, {
+      mimeType: "video/webm;codecs=vp9",
+    })
+
+    const chunks: Blob[] = []
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size > 0) {
+        chunks.push(event.data)
+      }
+    }
+
+    mediaRecorder.onstop = () => {
+      setRecordedChunks(chunks)
+    }
+
+    mediaRecorderRef.current = mediaRecorder
+    mediaRecorder.start()
+    setIsRecording(true)
+  }
+
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && isRecording) {
+      mediaRecorderRef.current.stop()
+      setIsRecording(false)
+    }
+  }
+
+  const downloadVideo = () => {
+    if (recordedChunks.length === 0) return
+
+    const blob = new Blob(recordedChunks, { type: "video/webm" })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = `speedometer-recording-${new Date().toISOString().slice(0, 19)}.webm`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    setRecordedChunks([])
+  }
+
+  const drawSpeedometerOverlay = () => {
+    if (!canvasRef.current || !videoRef.current) return
+
+    const canvas = canvasRef.current
+    const ctx = canvas.getContext("2d")
+    const video = videoRef.current
+
+    if (!ctx) return
+
+    // Set canvas size to match video
+    canvas.width = video.videoWidth || 1920
+    canvas.height = video.videoHeight || 1080
+
+    // Draw video frame
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
+
+    // Draw speedometer overlay in top-right corner
+    const overlaySize = Math.min(canvas.width, canvas.height) * 0.25
+    const overlayX = canvas.width - overlaySize - 20
+    const overlayY = 20
+
+    // Semi-transparent background
+    ctx.fillStyle = "rgba(0, 0, 0, 0.7)"
+    ctx.fillRect(overlayX - 10, overlayY - 10, overlaySize + 20, overlaySize + 20)
+
+    // Draw speedometer circle
+    const centerX = overlayX + overlaySize / 2
+    const centerY = overlayY + overlaySize / 2
+    const radius = overlaySize / 2 - 20
+
+    // Outer circle
+    ctx.strokeStyle = "#8b5cf6"
+    ctx.lineWidth = 3
+    ctx.beginPath()
+    ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI)
+    ctx.stroke()
+
+    // Speed arc
+    const displaySpeed = unit === "mph" ? speed : speed * 1.609344
+    const speedPercentage = Math.min((displaySpeed / 200) * 100, 100)
+    const arcAngle = (speedPercentage / 100) * 2 * Math.PI
+
+    ctx.strokeStyle = "#ec4899"
+    ctx.lineWidth = 6
+    ctx.beginPath()
+    ctx.arc(centerX, centerY, radius - 10, -Math.PI / 2, -Math.PI / 2 + arcAngle)
+    ctx.stroke()
+
+    // Speed text
+    ctx.fillStyle = "white"
+    ctx.font = `bold ${overlaySize * 0.15}px monospace`
+    ctx.textAlign = "center"
+    ctx.fillText(displaySpeed.toFixed(1), centerX, centerY - 10)
+
+    ctx.font = `${overlaySize * 0.08}px sans-serif`
+    ctx.fillText(unit.toUpperCase(), centerX, centerY + 20)
+
+    // GPS status
+    ctx.font = `${overlaySize * 0.06}px sans-serif`
+    ctx.fillStyle = isConnected ? "#10b981" : "#ef4444"
+    ctx.fillText(isConnected ? "GPS Connected" : "GPS Disconnected", centerX, centerY + 40)
+  }
+
+  useEffect(() => {
+    let animationId: number
+
+    const animate = () => {
+      if (isCameraActive) {
+        drawSpeedometerOverlay()
+      }
+      animationId = requestAnimationFrame(animate)
+    }
+
+    if (isCameraActive) {
+      animate()
+    }
+
+    return () => {
+      if (animationId) {
+        cancelAnimationFrame(animationId)
+      }
+    }
+  }, [isCameraActive, speed, unit, isConnected])
 
   const startTracking = () => {
     if (!navigator.geolocation) {
@@ -170,8 +349,75 @@ export default function GPSSpeedometer() {
       if (watchIdRef.current !== null) {
         navigator.geolocation.clearWatch(watchIdRef.current)
       }
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop())
+      }
     }
   }, [])
+
+  if (isCameraActive) {
+    return (
+      <div className="fixed inset-0 bg-black">
+        <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+        <canvas ref={canvasRef} className="hidden" />
+
+        {/* Recording Controls Overlay */}
+        <div className="absolute bottom-6 left-1/2 transform -translate-x-1/2 flex gap-4">
+          {!isRecording ? (
+            <Button
+              onClick={startRecording}
+              className="bg-red-600 hover:bg-red-700 text-white px-6 py-3 rounded-full"
+              disabled={!isTracking}
+            >
+              <Video className="w-5 h-5 mr-2" />
+              Start Recording
+            </Button>
+          ) : (
+            <Button
+              onClick={stopRecording}
+              className="bg-red-800 hover:bg-red-900 text-white px-6 py-3 rounded-full animate-pulse"
+            >
+              <VideoOff className="w-5 h-5 mr-2" />
+              Stop Recording
+            </Button>
+          )}
+
+          {recordedChunks.length > 0 && (
+            <Button
+              onClick={downloadVideo}
+              className="bg-green-600 hover:bg-green-700 text-white px-6 py-3 rounded-full"
+            >
+              <Download className="w-5 h-5 mr-2" />
+              Download
+            </Button>
+          )}
+
+          <Button
+            onClick={stopCamera}
+            variant="outline"
+            className="px-6 py-3 rounded-full bg-black/50 border-white/30 text-white"
+          >
+            Exit Camera
+          </Button>
+        </div>
+
+        {/* Status Overlay */}
+        <div className="absolute top-6 left-6 space-y-2">
+          <Badge variant={isConnected ? "default" : "destructive"} className="flex items-center gap-2">
+            {isConnected ? <Wifi className="w-4 h-4" /> : <WifiOff className="w-4 h-4" />}
+            {isConnected ? "GPS Connected" : "GPS Disconnected"}
+          </Badge>
+
+          {isRecording && (
+            <Badge className="bg-red-600 text-white animate-pulse">
+              <div className="w-2 h-2 bg-white rounded-full mr-2"></div>
+              Recording
+            </Badge>
+          )}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 flex items-center justify-center p-4">
@@ -318,17 +564,31 @@ export default function GPSSpeedometer() {
             </Button>
           </div>
 
+          <div className="flex gap-3">
+            {!isCameraActive ? (
+              <Button onClick={startCamera} className="flex-1 bg-blue-600 hover:bg-blue-700" disabled={!isTracking}>
+                <Camera className="w-4 h-4 mr-2" />
+                Start Camera
+              </Button>
+            ) : (
+              <Button onClick={stopCamera} variant="outline" className="flex-1 bg-transparent">
+                <VideoOff className="w-4 h-4 mr-2" />
+                Stop Camera
+              </Button>
+            )}
+          </div>
+
           <Button onClick={resetMaxSpeed} variant="outline" className="w-full bg-transparent" disabled={maxSpeed === 0}>
             Reset Max Speed
           </Button>
         </div>
 
         {/* Error Display */}
-        {error && (
+        {(error || cameraError) && (
           <Card className="p-4 bg-red-900/20 border-red-500/30">
             <div className="flex items-center gap-2 text-red-400">
               <AlertTriangle className="w-5 h-5" />
-              <span className="text-sm">{error}</span>
+              <span className="text-sm">{error || cameraError}</span>
             </div>
           </Card>
         )}
@@ -340,10 +600,11 @@ export default function GPSSpeedometer() {
               <strong>Instructions:</strong>
             </p>
             <ul className="list-disc list-inside space-y-1 text-xs">
-              <li>Allow location access when prompted</li>
-              <li>Works best outdoors with clear GPS signal</li>
-              <li>Speed is calculated from GPS coordinates</li>
-              <li>Accuracy depends on GPS signal strength</li>
+              <li>Start GPS tracking first for speed data</li>
+              <li>Click "Start Camera" to enable video recording</li>
+              <li>Allow camera and location access when prompted</li>
+              <li>Speedometer overlay appears in camera view</li>
+              <li>Record videos with real-time speed display</li>
               <li>Use responsibly and follow traffic laws</li>
             </ul>
           </div>
